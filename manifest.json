@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "双语翻译助手",
+  "version": "1.0",
+  "description": "划词翻译 + 整页双语翻译，支持 Google/DeepL/OpenAI/Microsoft 多种翻译后端",
+  "default_locale": "zh_CN",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["utils/translators.js", "content/page-translator.js", "content/popup.js", "content/content.js"],
+      "css": ["content/content.css"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "双语翻译助手"
+  },
+  "options_page": "options/options.html",
+  "commands": {
+    "toggle-page-translate": {
+      "suggested_key": {
+        "default": "Alt+T"
+      },
+      "description": "切换整页双语翻译"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

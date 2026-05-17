@@ -1,0 +1,9 @@
+# 保存的测试网页
+*_files/
+*.html
+
+# Claude 项目记忆
+project_memory/
+
+# 开发过程中的提示词
+生成的提示词.md
