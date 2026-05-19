@@ -67,19 +67,17 @@ async function handleTranslate(request) {
   return { ...result, cached: false };
 }
 
-/** 向当前 tab 的 content script 转发消息 */
+/** 向当前 tab 的 content script 转发消息，返回其响应 */
 async function sendToCurrentTab(msg) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) {
     return { error: '未找到打开的标签页' };
   }
-  // 无法注入 content script 的页面（chrome:// 等）
   if (tab.url && !tab.url.startsWith('http')) {
     return { error: '请在普通网页上使用此功能' };
   }
   try {
-    await chrome.tabs.sendMessage(tab.id, msg);
-    return { success: true };
+    return await chrome.tabs.sendMessage(tab.id, msg);
   } catch (e) {
     return { error: '请刷新页面后重试（Content Script 未就绪）' };
   }

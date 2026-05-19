@@ -15,6 +15,7 @@ class PageTranslator {
     this._progressBadge = null;
     this._observer = null;
     this._observerDebounce = null;
+    this._translateCache = new Map();
   }
 
   /** 触发整页翻译 */
@@ -65,11 +66,22 @@ class PageTranslator {
 
       try {
         const batchText = batch.map(s => s.text).join('|||');
-        const result = await chrome.runtime.sendMessage({
-          type: 'TRANSLATE',
-          text: batchText,
-          targetLang: target
-        });
+
+        // 查缓存：同一页面切换翻译/原文可复用已有结果
+        let result;
+        const cached = this._translateCache.get(batchText);
+        if (cached !== undefined) {
+          result = { translated: cached };
+        } else {
+          result = await chrome.runtime.sendMessage({
+            type: 'TRANSLATE',
+            text: batchText,
+            targetLang: target
+          });
+        }
+
+        // 已在飞的批次返回后，若用户中途取消则丢弃结果
+        if (this._aborted) break;
 
         if (result.error) {
           console.error('批次翻译失败:', result.error);
@@ -81,8 +93,11 @@ class PageTranslator {
             }
           }
         } else {
+          // 缓存翻译结果供下次复用
+          if (cached === undefined) {
+            this._translateCache.set(batchText, result.translated);
+          }
           const chunks = result.translated.split('|||').map(c => c.trim());
-          // chunk 与段落一一对应，多余的占位符移除
           for (let j = 0; j < batch.length; j++) {
             const chunk = chunks[j] || '';
             const { id } = batchPlaceholders[j];
@@ -549,10 +564,22 @@ class PageTranslator {
 
     try {
       const batchText = segments.map(s => s.text).join('|||');
-      const result = await chrome.runtime.sendMessage({
-        type: 'TRANSLATE', text: batchText, targetLang
-      });
+
+      // 查缓存
+      let result;
+      const cached = this._translateCache.get(batchText);
+      if (cached !== undefined) {
+        result = { translated: cached };
+      } else {
+        result = await chrome.runtime.sendMessage({
+          type: 'TRANSLATE', text: batchText, targetLang
+        });
+      }
+
       if (result.error) return;
+      if (cached === undefined) {
+        this._translateCache.set(batchText, result.translated);
+      }
 
       const chunks = result.translated.split('|||').map(c => c.trim());
       for (let i = 0; i < Math.min(segments.length, chunks.length); i++) {
@@ -572,7 +599,6 @@ class PageTranslator {
         origEl.appendChild(br);
         origEl.appendChild(transSpan);
 
-        // 标记已翻译，防止后续 Observer 触发再次提取
         origEl.setAttribute('data-translated', 'true');
       }
     } catch (e) {
