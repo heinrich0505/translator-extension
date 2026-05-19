@@ -200,7 +200,9 @@ class PageTranslator {
       seen.add(el);
 
       const { cleanText } = this._protectLatex(text);
-      if (cleanText.trim().length < 2) continue;
+      // 去掉所有公式占位符后若没有文字，说明是纯公式元素（如展示矩阵），跳过不翻译
+      const pureText = cleanText.replace(/\s*\{LX\d+\}\s*/g, '').trim();
+      if (pureText.length < 2) continue;
 
       segments.push({ element: el, text: cleanText.trim() });
     }
