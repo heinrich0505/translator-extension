@@ -12,7 +12,9 @@ const defaults = {
   targetLang: 'zh-CN',
   enableSelection: true,
   enablePageTranslate: true,
-  selectionDelay: 300
+  selectionDelay: 300,
+  stylePreset: 'general',
+  customPrompt: ''
 };
 
 // DOM 元素
@@ -33,6 +35,10 @@ const els = {
   enablePageTranslate: document.getElementById('enablePageTranslate'),
   selectionDelay: document.getElementById('selectionDelay'),
   delayValue: document.getElementById('delay-value'),
+  styleCard: document.getElementById('style-card'),
+  stylePreset: document.getElementById('stylePreset'),
+  customPromptGroup: document.getElementById('custom-prompt-group'),
+  customPrompt: document.getElementById('customPrompt'),
   status: document.getElementById('status')
 };
 
@@ -50,6 +56,9 @@ function updateProviderUI() {
   // LibreTranslate 实例地址
   els.ltConfig.style.display = provider === 'libretranslate' ? 'block' : 'none';
 
+  // AI 翻译风格卡片（仅 OpenAI 引擎可见）
+  els.styleCard.style.display = provider === 'openai' ? 'block' : 'none';
+
   // 提示信息
   const hints = {
     deepl: '免费版 Key 以 :fx 结尾，Pro 版 Key 不需要',
@@ -58,6 +67,11 @@ function updateProviderUI() {
     libretranslate: '可选，不填则使用无 Key 模式（请求频率受限）'
   };
   els.apiHint.textContent = hints[provider] || '';
+}
+
+/** 预设切换时显示/隐藏自定义输入框 */
+function updateStyleUI() {
+  els.customPromptGroup.style.display = els.stylePreset.value === 'custom' ? 'block' : 'none';
 }
 
 /** 读取所有配置值 */
@@ -73,7 +87,9 @@ function getConfig() {
     targetLang: els.targetLang.value,
     enableSelection: els.enableSelection.checked,
     enablePageTranslate: els.enablePageTranslate.checked,
-    selectionDelay: parseInt(els.selectionDelay.value)
+    selectionDelay: parseInt(els.selectionDelay.value),
+    stylePreset: els.stylePreset.value,
+    customPrompt: els.customPrompt.value.trim()
   };
 }
 
@@ -100,7 +116,10 @@ function loadSettings() {
     els.enablePageTranslate.checked = config.enablePageTranslate !== false;
     els.selectionDelay.value = config.selectionDelay || 300;
     els.delayValue.textContent = (config.selectionDelay || 300) + 'ms';
+    els.stylePreset.value = config.stylePreset || 'general';
+    els.customPrompt.value = config.customPrompt || '';
     updateProviderUI();
+    updateStyleUI();
   });
 }
 
@@ -123,6 +142,8 @@ els.toggleKey.addEventListener('click', () => {
   els.apiKey.type = isPass ? 'text' : 'password';
   els.toggleKey.textContent = isPass ? '🙈' : '👁';
 });
+els.stylePreset.addEventListener('change', () => { updateStyleUI(); saveSettings(); });
+els.customPrompt.addEventListener('input', saveSettings);
 
 // 初始化
 loadSettings();

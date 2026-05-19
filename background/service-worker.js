@@ -31,7 +31,9 @@ async function getConfig() {
     apiEndpoint: '',
     modelName: 'gpt-3.5-turbo',
     sourceLang: '',
-    targetLang: 'zh-CN'
+    targetLang: 'zh-CN',
+    stylePreset: 'general',
+    customPrompt: ''
   };
   try {
     const result = await chrome.storage.sync.get(defaults);

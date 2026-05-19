@@ -541,8 +541,10 @@ class PageTranslator {
   }
 
   async _translateNewContent(targetLang) {
-    // _extractSegments 会自动跳过 [data-translated] 元素，所以这里只拿到新内容
-    const segments = this._extractSegments();
+    // _extractSegments 会自动跳过 [data-translated] 元素
+    let segments = this._extractSegments();
+    // 过滤：祖先元素内嵌了已译子元素，Observer 不应重复翻译
+    segments = segments.filter(s => !s.element.querySelector('[data-translated]'));
     if (segments.length === 0) return;
 
     try {

@@ -200,17 +200,43 @@ class Translators {
   }
 
   /* ===== OpenAI 兼容接口 ===== */
+  static _getPresetPrompt(preset, sourceHint, targetName) {
+    const presets = {
+      general: `你是一个专业翻译引擎。请将以下文本${sourceHint}翻译成${targetName}。`,
+
+      academic: `你是一名学术论文翻译专家。请将以下文本${sourceHint}翻译成${targetName}。要求：1. 专业术语翻译准确，符合学术规范 2. 句式严谨，逻辑清晰，保持被动语态 3. 保留原文的学术语气和严谨性。`,
+
+      math: `你是一名数学教材翻译专家。请将以下文本${sourceHint}翻译成${targetName}。要求：1. 数学术语翻译准确（如 basis→基, dimension→维数, span→张成, subspace→子空间, rank→秩, nullity→零度, eigenvalue→特征值, determinant→行列式, linear independence→线性无关, column space→列空间, null space→零空间）2. 保留定理(Theorem)/定义(Definition)/证明(Proof)的严谨语气 3. 公式占位符({LX0})绝对原样保留 4. 数学符号和数字不翻译。`,
+
+      tech: `你是一名技术文档翻译专家。请将以下文本${sourceHint}翻译成${targetName}。要求：1. 技术术语统一且准确 2. 句式简洁明了，避免歧义 3. 代码、变量名、命令行保持原样 4. 遵循中文技术文档习惯。`,
+
+      news: `你是一名新闻翻译编辑。请将以下文本${sourceHint}翻译成${targetName}。要求：1. 译文流畅自然，适合中文读者阅读 2. 符合中文新闻标题和报道习惯 3. 人名、地名、机构名翻译准确 4. 保持原文新闻价值。`,
+
+      literary: `你是一名文学翻译家。请将以下文本${sourceHint}翻译成${targetName}。要求：1. 保持原文风格与情感色彩 2. 语言优美自然，注重可读性 3. 对话翻译口语化、符合人物性格 4. 修辞手法恰当转化。`
+    };
+    return presets[preset] || presets.general;
+  }
+
   static async openaiTranslate(text, targetLang, sourceLang, config) {
     if (!config.apiKey) throw new Error('请先在设置中填入 API Key');
 
     const baseUrl = config.apiEndpoint || 'https://api.openai.com/v1/chat/completions';
     const model = config.modelName || 'gpt-3.5-turbo';
-    const langName = Translators._getLangName(targetLang);
-    const sourceHint = sourceLang ? `从${Translators._getLangName(sourceLang)}` : '';
+    const targetName = Translators._getLangName(targetLang);
+    const sourceName = sourceLang ? Translators._getLangName(sourceLang) : '';
+    const sourceHint = sourceName ? `从${sourceName}` : '';
 
-    const systemPrompt = sourceHint
-      ? `你是一个专业翻译引擎。请将以下文本${sourceHint}翻译成${langName}。要求：1. 仅输出译文，不要任何解释 2. 保持原文段落结构，用 ||| 分隔多个段落 3. 保持 LaTeX 公式({LX0})、数字、代码原样不动 4. 对应每个输入段落输出一个译文段落。`
-      : `你是一个专业翻译引擎。请将以下文本翻译成${langName}。要求：1. 仅输出译文，不要任何解释 2. 保持原文段落结构，用 ||| 分隔多个段落 3. 保持 LaTeX 公式({LX0})、数字、代码原样不动 4. 对应每个输入段落输出一个译文段落。`;
+    // 构建 system prompt：自定义 > 预设 > 默认
+    const suffix = `必须遵守：1. 仅输出译文，不要任何解释 2. 保持原文段落结构，用 ||| 分隔多个段落 3. 保持公式占位符({LX0})、数字、代码原样不动 4. 每个输入段落对应一个译文段落。`;
+
+    let systemPrompt;
+    if (config.customPrompt) {
+      systemPrompt = config.customPrompt
+        .replace(/\{source\}/g, sourceName)
+        .replace(/\{target\}/g, targetName) + '\n' + suffix;
+    } else {
+      systemPrompt = Translators._getPresetPrompt(config.stylePreset || 'general', sourceHint, targetName) + suffix;
+    }
 
     const resp = await fetch(baseUrl, {
       method: 'POST',
