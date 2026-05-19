@@ -262,11 +262,13 @@ class PageTranslator {
         const tag = node.tagName.toLowerCase();
         if (['strong', 'em', 'b', 'i', 'a', 'code', 'sub', 'sup', 'mark', 'small', 'u', 's', 'span'].includes(tag)) {
           if (this._hasLatex(node)) {
+            // DOM 渲染型公式 → 占位符，存 textContent（公式文字），原件 SVG 依旧可见
             directText += this._getLatexPlaceholder(node);
           } else {
             directText += node.textContent || '';
           }
         } else if (node.matches && node.matches('svg, [class*="pretex"], [class*="MathJax"], [class*="katex"], [class*="mjx"]')) {
+          // DOM 渲染型公式 → 占位符
           directText += this._getLatexPlaceholder(node);
         }
       }
@@ -303,32 +305,42 @@ class PageTranslator {
    * LaTeX 公式保护
    * ================================================================ */
 
+  _nextLatexId() {
+    // {LX0} 格式：花括号是标准 i18n 占位符，LX 不是可识别单词，
+    // 翻译引擎（Google/MyMemory）不会拆散或改写它
+    return `{LX${this._placeholderIdx++}}`;
+  }
+
   _protectLatex(text) {
     const placeholders = new Map();
     let result = text;
 
+    // $$...$$ 展示公式 → 占位符
     result = result.replace(/\$\$([\s\S]*?)\$\$/g, (match) => {
-      const id = `__LATEX_${this._placeholderIdx++}__`;
+      const id = this._nextLatexId();
       placeholders.set(id, match);
-      return ' ' + id + ' ';
+      return id;
     });
 
+    // $...$ 行内公式
     result = result.replace(/(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)/g, (match) => {
-      const id = `__LATEX_${this._placeholderIdx++}__`;
+      const id = this._nextLatexId();
       placeholders.set(id, match);
       return id;
     });
 
+    // \(...\) 行内公式
     result = result.replace(/\\\(([\s\S]*?)\\\)/g, (match) => {
-      const id = `__LATEX_${this._placeholderIdx++}__`;
+      const id = this._nextLatexId();
       placeholders.set(id, match);
       return id;
     });
 
+    // \[...\] 展示公式
     result = result.replace(/\\\[([\s\S]*?)\\\]/g, (match) => {
-      const id = `__LATEX_${this._placeholderIdx++}__`;
+      const id = this._nextLatexId();
       placeholders.set(id, match);
-      return ' ' + id + ' ';
+      return id;
     });
 
     for (const [k, v] of placeholders) {
@@ -338,13 +350,24 @@ class PageTranslator {
   }
 
   _restoreLatex(text) {
-    let result = text;
+    // 先对翻译结果做 HTML 转义，避免译者返回的 < > & 被解释为标签
+    let result = Translators.escapeHtml(text);
+    // 恢复占位符：文本公式为 LaTeX 源码，DOM 公式为 outerHTML
     for (const [id, original] of this._placeholderMap) {
       const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      result = result.replace(new RegExp(escaped, 'g'), original);
+      result = result.replace(new RegExp('\\s*' + escaped + '\\s*', 'g'), original || '');
     }
-    result = result.replace(/__LATEX_\d+__/g, '');
+    // 清理残留（不在 map 中的占位符，新旧格式兼顾）
+    result = result.replace(/\s*\{LX\d+\}\s*/g, '');
+    result = result.replace(/\s*__LATEX_\d+__\s*/g, '');
     return result;
+  }
+
+  /** 去除 HTML 标签，用于与原文 innerText 做相等比较 */
+  _stripHtml(html) {
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    return (div.innerText || div.textContent || '').trim();
   }
 
   _hasLatex(el) {
@@ -356,8 +379,8 @@ class PageTranslator {
   }
 
   _getLatexPlaceholder(el) {
-    const id = `__LATEX_${this._placeholderIdx++}__`;
-    this._placeholderMap.set(id, el.textContent || el.innerText || '');
+    const id = this._nextLatexId();
+    this._placeholderMap.set(id, el.outerHTML || '');
     return id;
   }
 
@@ -408,19 +431,19 @@ class PageTranslator {
       return;
     }
 
-    // 检查是否与原文相同
+    // 检查是否与原文相同（比较时去除 restored 中的 HTML 标签）
     const origText = (origElement.innerText || origElement.textContent || '').trim();
-    if (restored.trim() === origText) {
+    if (this._stripHtml(restored) === origText) {
       const el = document.getElementById(id);
       if (el) el.remove();
       return;
     }
 
-    // 替换占位符：在原文元素内部追加译文 span
+    // 替换占位符：在原文元素内部追加译文 span。用 innerHTML 以支持公式 DOM
     const transSpan = document.createElement('span');
     transSpan.className = 'tr-bilingual tr-bilingual--done';
     transSpan.setAttribute('data-translator', 'true');
-    transSpan.textContent = restored.trim();
+    transSpan.innerHTML = restored.trim();
 
     const oldEl = document.getElementById(id);
     if (oldEl && oldEl.parentNode) {
@@ -532,12 +555,12 @@ class PageTranslator {
         const restored = this._restoreLatex(chunks[i] || '');
         if (!restored.trim()) continue;
         const origText = (segments[i].element.innerText || '').trim();
-        if (restored.trim() === origText) continue;
+        if (this._stripHtml(restored) === origText) continue;
 
         const transSpan = document.createElement('span');
         transSpan.className = 'tr-bilingual tr-bilingual--done';
         transSpan.setAttribute('data-translator', 'observer');
-        transSpan.textContent = restored.trim();
+        transSpan.innerHTML = restored.trim();
 
         const origEl = segments[i].element;
         const br = document.createElement('br');

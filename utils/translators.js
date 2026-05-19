@@ -209,8 +209,8 @@ class Translators {
     const sourceHint = sourceLang ? `从${Translators._getLangName(sourceLang)}` : '';
 
     const systemPrompt = sourceHint
-      ? `你是一个专业翻译引擎。请将以下文本${sourceHint}翻译成${langName}。要求：1. 仅输出译文，不要任何解释 2. 保持原文段落结构，用 ||| 分隔多个段落 3. 保持 LaTeX 公式(__LATEX_N__)、数字、代码原样不动 4. 对应每个输入段落输出一个译文段落。`
-      : `你是一个专业翻译引擎。请将以下文本翻译成${langName}。要求：1. 仅输出译文，不要任何解释 2. 保持原文段落结构，用 ||| 分隔多个段落 3. 保持 LaTeX 公式(__LATEX_N__)、数字、代码原样不动 4. 对应每个输入段落输出一个译文段落。`;
+      ? `你是一个专业翻译引擎。请将以下文本${sourceHint}翻译成${langName}。要求：1. 仅输出译文，不要任何解释 2. 保持原文段落结构，用 ||| 分隔多个段落 3. 保持 LaTeX 公式({LX0})、数字、代码原样不动 4. 对应每个输入段落输出一个译文段落。`
+      : `你是一个专业翻译引擎。请将以下文本翻译成${langName}。要求：1. 仅输出译文，不要任何解释 2. 保持原文段落结构，用 ||| 分隔多个段落 3. 保持 LaTeX 公式({LX0})、数字、代码原样不动 4. 对应每个输入段落输出一个译文段落。`;
 
     const resp = await fetch(baseUrl, {
       method: 'POST',
