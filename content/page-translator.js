@@ -396,6 +396,9 @@ class PageTranslator {
   }
 
   _getLatexPlaceholder(el) {
+    const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    // 纯标点符号（逗号、句号等）作为普通文本，不走公式克隆，避免半角标点混入译文
+    if (text && /^[\p{P}]+$/u.test(text) && text.length <= 2) return text;
     const id = this._nextLatexId();
     this._placeholderMap.set(id, el.outerHTML || '');
     return id;
