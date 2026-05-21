@@ -234,18 +234,44 @@ class PageTranslator {
    * 例如 <div> 包裹 <p>，两者的 innerText 重叠 → 保留 <p>
    */
   _dedupSegments(segments) {
+    const segmentMap = new Map(segments.map(s => [s.element, s]));
     const elementSet = new Set(segments.map(s => s.element));
 
     return segments.filter(seg => {
       // 检查当前元素是否包含其他段落元素
       for (const other of elementSet) {
         if (other === seg.element) continue;
-        if (seg.element.contains(other) && this._textsOverlap(seg.text, segments.find(s => s.element === other)?.text || '')) {
+        if (seg.element.contains(other) && this._textsOverlap(seg.text, segmentMap.get(other)?.text || '')) {
           return false; // 是祖先，且文本重叠 → 移除
         }
       }
+      // 聚合容器检测：父元素包含 ≥3 个子段落且子文本均为父文本子串时，
+      // 父元素是多个独立条目的容器（如热榜、新闻轮播），应移除
+      if (this._isAggregateContainer(seg, segments, segmentMap)) {
+        return false;
+      }
       return true;
     });
+  }
+
+  /**
+   * 检测元素是否为聚合容器
+   * 当父元素包含 ≥3 个子段落，且每个子段落文本都是父文本的子串时，
+   * 说明父文本仅仅是子文本的拼接，父元素并非独立文本块
+   */
+  _isAggregateContainer(seg, segments, segmentMap) {
+    const children = segments.filter(s =>
+      s.element !== seg.element && seg.element.contains(s.element));
+    if (children.length < 3) return false;
+
+    let matched = 0;
+    for (const child of children) {
+      const childText = child.text;
+      if (childText.length >= 2 && seg.text.includes(childText)) {
+        matched++;
+      }
+    }
+    return matched >= 3;
   }
 
   /** 判断两段文本是否有重叠（简化：子串匹配或 80%+ 相似度） */
