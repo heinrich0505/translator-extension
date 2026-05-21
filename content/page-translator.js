@@ -16,6 +16,7 @@ class PageTranslator {
     this._observer = null;
     this._observerDebounce = null;
     this._translateCache = new Map();
+    this._runId = 0;
   }
 
   /** 触发整页翻译 */
@@ -27,6 +28,8 @@ class PageTranslator {
 
     this.isActive = true;
     this._aborted = false;
+    this._runId++;
+    const runId = this._runId;
     this._translatedCount = 0;
     this._placeholderMap.clear();
     this._placeholderIdx = 0;
@@ -80,8 +83,8 @@ class PageTranslator {
           });
         }
 
-        // 已在飞的批次返回后，若用户中途取消则丢弃结果
-        if (this._aborted) break;
+        // 已在飞的批次返回后，若用户中途取消或重启了翻译则丢弃结果
+        if (this._aborted || this._runId !== runId) break;
 
         if (result.error) {
           console.error('批次翻译失败:', result.error);
@@ -248,8 +251,9 @@ class PageTranslator {
   /** 判断两段文本是否有重叠（简化：子串匹配或 80%+ 相似度） */
   _textsOverlap(parentText, childText) {
     if (!parentText || !childText) return false;
-    // 子串包含关系
-    if (parentText.includes(childText) || childText.includes(parentText)) return true;
+    // 子串包含关系：仅当子文本占父文本 60%+ 才视为重叠，避免 "yours" ⊂ "but this one is yours." 误删父级
+    if (childText.includes(parentText)) return true;
+    if (parentText.includes(childText)) return childText.length > parentText.length * 0.6;
     // 简单 Jaccard 相似度估算
     const parentWords = new Set(parentText.split(/\s+/));
     const childWords = new Set(childText.split(/\s+/));
@@ -277,7 +281,7 @@ class PageTranslator {
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         childElementCount++;
         const tag = node.tagName.toLowerCase();
-        if (['strong', 'em', 'b', 'i', 'a', 'code', 'sub', 'sup', 'mark', 'small', 'u', 's', 'span'].includes(tag)) {
+        if (['strong', 'em', 'b', 'i', 'a', 'sub', 'sup', 'mark', 'small', 'u', 's', 'span'].includes(tag)) {
           if (this._hasLatex(node)) {
             // DOM 渲染型公式 → 占位符，存 textContent（公式文字），原件 SVG 依旧可见
             directText += this._getLatexPlaceholder(node);
