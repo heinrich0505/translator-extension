@@ -16,10 +16,16 @@ class Translators {
         try {
           return await Translators.googleTranslate(text, targetLang, sourceLang);
         } catch (e) {
-          // Google 不可用时降级到 MyMemory
-          console.warn('Google 翻译失败，降级到 MyMemory:', e.message);
-          return Translators.mymemoryTranslate(text, targetLang, sourceLang);
+          console.warn('Google 翻译失败，尝试 Reverso:', e.message);
         }
+        // Google 失败 → Reverso（免费 NMT，无需 API Key）
+        try {
+          return await Translators.reversoTranslate(text, targetLang, sourceLang);
+        } catch (e) {
+          console.warn('Reverso 翻译失败，降级到 MyMemory:', e.message);
+        }
+        // Reverso 也失败 → MyMemory（最后兜底）
+        return Translators.mymemoryTranslate(text, targetLang, sourceLang);
 
       case 'mymemory':
         return Translators.mymemoryTranslate(text, targetLang, sourceLang);
@@ -37,46 +43,98 @@ class Translators {
         return Translators.microsoftTranslate(text, targetLang, sourceLang, config.apiKey);
 
       default:
-        // 未知 provider，先尝试 Google，失败则 MyMemory
+        // 未知 provider，先尝试 Google，失败则 Reverso，最后 MyMemory
         try {
           return await Translators.googleTranslate(text, targetLang, sourceLang);
         } catch (e) {
-          return Translators.mymemoryTranslate(text, targetLang, sourceLang);
+          console.warn('Google 翻译失败，尝试 Reverso:', e.message);
         }
+        try {
+          return await Translators.reversoTranslate(text, targetLang, sourceLang);
+        } catch (e) {
+          console.warn('Reverso 翻译失败，降级到 MyMemory:', e.message);
+        }
+        return Translators.mymemoryTranslate(text, targetLang, sourceLang);
     }
   }
 
-  /* ===== Google Translate（免费） ===== */
+  /* ===== Google Translate（超时+快速降级，境内被封时不再重试浪费时间的端点） ===== */
   static async googleTranslate(text, targetLang, sourceLang) {
-    // 用 ||| 分隔多段文本，直接发送不做换行转换
-    // Google 会把 ||| 保留不变，避免换行转换导致的分隔符错乱
-    const url = 'https://translate.googleapis.com/translate_a/single?' + new URLSearchParams({
-      client: 'gtx',
-      sl: sourceLang || 'auto',
-      tl: targetLang,
-      dt: 't',
-      q: text
-    }).toString();
+    const src = sourceLang || 'auto';
+    const tl = targetLang;
 
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`Google: HTTP ${resp.status}`);
-    const data = await resp.json();
-    if (!data || !data[0]) throw new Error('Google: 返回数据为空');
+    // 只用 dict-chrome-ex 端点（境内被封时快速失败）
+    // 不试多个端点——translate.googleapis.com 整个域在境内被 GFW 封锁
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
 
-    let translated = '';
-    for (const block of data[0]) {
-      if (block && block[0]) translated += block[0];
+    try {
+      const params = { client: 'dict-chrome-ex', sl: src, tl, dj: '1', q: text };
+      const qs = new URLSearchParams(params).toString();
+      const resp = await fetch(`https://translate.googleapis.com/translate_a/t?${qs}`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) throw new Error(`Google: HTTP ${resp.status}`);
+      const data = await resp.json();
+      if (!data.sentences || !data.sentences.length) throw new Error('Google: 返回数据为空');
+
+      return {
+        translated: data.sentences.map(s => s.trans).join(''),
+        from: data.src || src,
+        to: tl
+      };
+    } catch (e) {
+      clearTimeout(timeoutId);
+      throw e;
+    }
+  }
+
+
+
+  /**
+   * 按【N】标记拆分翻译结果
+   * Google 翻译会保留【N】标记不变，译文按标记拆分回各段
+   * 拆分不匹配时回退到 ||| 拆分
+   */
+  static _splitNumberedResult(translated, expectedCount) {
+    // 先尝试按【N】拆分
+    const markerRegex = /【(\d+)】/g;
+    const parts = [];
+    let lastIdx = 0;
+    let match;
+    let markerCount = 0;
+
+    while ((match = markerRegex.exec(translated)) !== null) {
+      markerCount++;
+      // 把标记前的文本（去掉前导空格）推入上一个段落
+      if (lastIdx < match.index) {
+        parts.push(translated.substring(lastIdx, match.index).trim());
+      }
+      lastIdx = match.index + match[0].length;
+    }
+    // 最后一个标记后的剩余文本
+    if (lastIdx < translated.length) {
+      parts.push(translated.substring(lastIdx).trim());
     }
 
-    return {
-      translated: translated.trim(),
-      from: data[2] || sourceLang || 'auto',
-      to: targetLang
-    };
+    if (parts.length === expectedCount) return parts;
+    if (parts.length > 0 && parts.length >= expectedCount) return parts.slice(0, expectedCount);
+
+    // 回退：按【N】拆分失败，尝试 ||| 
+    const fallback = translated.split('|||').map(c => c.trim()).filter(c => c);
+    if (fallback.length >= expectedCount) return fallback.slice(0, expectedCount);
+    if (fallback.length > 0 && parts.length === 0) return fallback;
+
+    // 仍然不匹配：把全部译文放入第一段，其余留空
+    if (parts.length === 0) { parts.push(translated.trim()); }
+    while (parts.length < expectedCount) parts.push('');
+    return parts.slice(0, expectedCount);
   }
 
   /* ===== MyMemory（免费，无需 API Key，每月 5000 字） ===== */
   static async mymemoryTranslate(text, targetLang, sourceLang) {
+
+
     // MyMemory 有长度限制，超长文本分段发送
     const SEP = '|||';
     const maxLen = 4000;
@@ -129,6 +187,50 @@ class Translators {
       to: targetLang
     };
   }
+
+  /* ===== Reverso Translate（免费 NMT，无需 API Key，天然支持数组输入） ===== */
+  static async reversoTranslate(text, targetLang, sourceLang) {
+    const parts = text.split('|||');
+    const src = sourceLang || 'en';
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const resp = await fetch('https://api.reverso.net/translate/v1/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          input: parts,
+          from: src,
+          to: targetLang,
+          format: 'text',
+          options: { context: [], sentenceSplitter: false, origin: 'translate-page' }
+        })
+      });
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) throw new Error(`Reverso: HTTP ${resp.status}`);
+      const data = await resp.json();
+      if (!data.translation) throw new Error('Reverso: 返回数据为空');
+
+      // Reverso 返回数组，正好对应输入的分段
+      const translated = Array.isArray(data.translation)
+        ? data.translation.join('|||')
+        : data.translation;
+
+      return {
+        translated,
+        from: data.languageDetection?.detectedLanguage || src,
+        to: targetLang
+      };
+    } catch (e) {
+      clearTimeout(timeoutId);
+      throw e;
+    }
+  }
+
 
   /* ===== LibreTranslate（免费开源，可自建实例） ===== */
   static async libretranslateTranslate(text, targetLang, sourceLang, config) {

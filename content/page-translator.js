@@ -44,96 +44,36 @@ class PageTranslator {
       this.isActive = false;
       return;
     }
+    // Step 2: 过滤不可翻译内容（标签/指标/代码）
+    const filtered = segments.filter(s => this._isContentText(s.text));
+    console.log(`[翻译] 提取 ${segments.length} 段，过滤后 ${filtered.length} 段`);
+    this._totalCount = filtered.length;
 
-    // Step 2: 立即注入加载占位符（渐进式体验的关键）
-    const placeholders = this._insertPlaceholders(segments);
+
+    if (filtered.length === 0) {
+      this._showProgress('未找到可翻译的文本内容', true);
+      this.isActive = false;
+      return;
+    }
+
+    // Step 3: 为有效段落注入加载占位符
+    const placeholders = this._insertPlaceholders(filtered);
     this._createProgressBadge();
 
-    // Step 3: 逐批翻译（每批 5 段）
-    const BATCH_SIZE = 5;
     const target = targetLang || 'zh-CN';
+    
+    const BATCH_SIZE = Math.max(20, Math.min(30, Math.ceil(filtered.length / 10)));
+    const CONCURRENCY = 3;
 
-    for (let i = 0; i < segments.length; i += BATCH_SIZE) {
-      if (this._aborted) break;
-
-      const batch = segments.slice(i, i + BATCH_SIZE);
-      const batchPlaceholders = placeholders.slice(i, i + BATCH_SIZE);
-
-      // 更新加载占位符为"翻译中..."
-      for (const ph of batchPlaceholders) {
-        const el = document.getElementById(ph.id);
-        if (el) {
-          el.classList.add('tr-translating');
-        }
-      }
-
-      try {
-        const batchText = batch.map(s => s.text).join('|||');
-
-        // 查缓存：同一页面切换翻译/原文可复用已有结果
-        let result;
-        const cached = this._translateCache.get(batchText);
-        if (cached !== undefined) {
-          result = { translated: cached };
-        } else {
-          result = await chrome.runtime.sendMessage({
-            type: 'TRANSLATE',
-            text: batchText,
-            targetLang: target
-          });
-        }
-
-        // 已在飞的批次返回后，若用户中途取消或重启了翻译则丢弃结果
-        if (this._aborted || this._runId !== runId) break;
-
-        if (result.error) {
-          console.error('批次翻译失败:', result.error);
-          for (const ph of batchPlaceholders) {
-            const el = document.getElementById(ph.id);
-            if (el) {
-              el.className = 'tr-error-badge';
-              el.textContent = '⚠ 翻译失败: ' + result.error;
-            }
-          }
-        } else {
-          // 缓存翻译结果供下次复用
-          if (cached === undefined) {
-            this._translateCache.set(batchText, result.translated);
-          }
-          const chunks = result.translated.split('|||').map(c => c.trim());
-          for (let j = 0; j < batch.length; j++) {
-            const chunk = chunks[j] || '';
-            const { id } = batchPlaceholders[j];
-            this._replacePlaceholder(id, chunk, batch[j].element);
-            this._translatedCount++;
-          }
-        }
-      } catch (e) {
-        console.error('批次翻译异常:', e);
-        for (const ph of batchPlaceholders) {
-          const el = document.getElementById(ph.id);
-          if (el) {
-            el.className = 'tr-error-badge';
-            el.textContent = '⚠ 网络错误: ' + e.message;
-          }
-        }
-      }
-
-      this._updateProgressBadge();
-
-      // 频率限制：批次间延迟，防止 API 并发限制
-      const lastBatch = i + BATCH_SIZE >= segments.length;
-      if (!lastBatch) {
-        await new Promise(r => setTimeout(r, 800));
-      }
-    }
+    // Step 3: 用并发池处理批次（3 路并发，每批 20-30 段）
+    await this._processBatchesConcurrently(filtered, placeholders, target, runId, BATCH_SIZE, CONCURRENCY);
 
     // 清理
     this._removeProgressBadge();
     this._placeholderMap.clear();
     this._placeholderIdx = 0;
 
-    // 初始翻译完成后启动 Observer，监听后续动态加载内容
+    // 初始翻译完成后启动 Observer
     this.startObserver(target);
 
     if (this._translatedCount > 0) {
@@ -144,6 +84,119 @@ class PageTranslator {
     }
   }
 
+  /**
+   * 并发池处理翻译批次
+   * CONCURRENCY 个 Worker 从队列取批次，并行发送请求
+   */
+  async _processBatchesConcurrently(segments, placeholders, targetLang, runId, BATCH_SIZE, CONCURRENCY) {
+    const totalBatches = Math.ceil(segments.length / BATCH_SIZE);
+
+    // 构建批次队列
+    const batches = [];
+    for (let i = 0; i < segments.length; i += BATCH_SIZE) {
+      batches.push({
+        index: i,
+        segs: segments.slice(i, i + BATCH_SIZE),
+        phs: placeholders.slice(i, i + BATCH_SIZE)
+      });
+    }
+
+    // 处理单个批次
+    const processOne = async (batch) => {
+      // 更新占位符为"翻译中..."
+      for (const p of batch.phs) {
+        const el = document.getElementById(p.id);
+        if (el) el.classList.add('tr-translating');
+      }
+      try {
+        const batchText = batch.segs.map(s => s.text).join('|||');
+
+        let result;
+        const cached = this._translateCache.get(batchText);
+        if (cached !== undefined) {
+          result = { translated: cached };
+        } else {
+          result = await chrome.runtime.sendMessage({
+            type: 'TRANSLATE',
+            text: batchText,
+            targetLang: targetLang
+          });
+        }
+
+        if (this._aborted || this._runId !== runId) return;
+
+        if (result.error) {
+          for (const p of batch.phs) {
+            const el = document.getElementById(p.id);
+            if (el) { el.className = 'tr-error-badge'; el.textContent = '⚠ ' + result.error; }
+          }
+        } else {
+          if (cached === undefined) {
+            this._translateCache.set(batchText, result.translated);
+          }
+          let chunks = (result.translated || '').split('|||').map(c => c.trim());
+          if (chunks.length !== batch.segs.length) {
+            chunks = Translators._splitNumberedResult(result.translated || '', batch.segs.length);
+          }
+          for (let j = 0; j < batch.segs.length; j++) {
+            const chunk = chunks[j] || '';
+            this._replacePlaceholder(batch.phs[j].id, chunk, batch.segs[j].element);
+            this._translatedCount++;
+          }
+        }
+
+      } catch (e) {
+        for (const p of batch.phs) {
+          const el = document.getElementById(p.id);
+          if (el) { el.className = 'tr-error-badge'; el.textContent = '⚠ ' + e.message; }
+        }
+      }
+
+      this._updateProgressBadge();
+    };
+
+    // 并发池：CONCURRENCY 个 Worker 抢队列
+    let batchIdx = 0;
+    const workers = Array.from(
+      { length: Math.min(CONCURRENCY, batches.length) },
+      async () => {
+        while (batchIdx < batches.length && !this._aborted) {
+          const batch = batches[batchIdx++];
+          await processOne(batch);
+        }
+      }
+    );
+
+    await Promise.all(workers);
+  }
+
+  /**
+   * 判断文本是否为有意义的可翻译内容
+   * 只跳过明确的非自然语言：纯符号/代码/标识符/极短文本
+   */
+  _isContentText(text) {
+    if (!text || text.length < 4) return false;
+
+    // 纯数字/指标/符号（如 "~27k", "2.1×", "+5 pp"）
+    if (/^[\d\s,.%×±≈~+‑−–—/:;()\[\]{}<>^@#$&*!'"?|\\]{1,30}$/.test(text)) return false;
+
+    // camelCase 标识符（如 "isActive", "translatePage"）
+    if (/^[a-z]+([A-Z][a-z0-9]*)+$/.test(text)) return false;
+
+    // snake_case / kebab-case 标识符
+    if (/^[a-z0-9]+[_\-][a-z0-9]+([_\-][a-z0-9]+)*$/i.test(text)) return false;
+
+    // 点分隔的技术标识符（如 "debug.enabled"），不匹配 ·•（自然语言列举）
+    if (/^[\w._-]+(\s*\.\s*[\w._-]+)+$/.test(text)) return false;
+
+    // 纯大写缩写 2-3 字符（如 "LSP", "DAP", "API"，不误杀 "DOCS" "URLS" 等导航标签）
+    if (/^[A-Z]{2,3}$/.test(text)) return false;
+
+
+    return true;
+  }
+
+  
   /** 移除已注入的译文 */
   removeTranslations() {
     this._aborted = true;
@@ -180,9 +233,8 @@ class PageTranslator {
     const blockTags = new Set([
       'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
       'LI', 'TD', 'TH', 'FIGCAPTION', 'BLOCKQUOTE',
-      'DD', 'DT', 'SUMMARY', 'LEGEND',
-      'DIV', 'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER',
-      'LABEL', 'SPAN'
+      'DD', 'DT', 'SUMMARY',
+      'DIV', 'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'HEADER', 'FOOTER'
     ]);
 
     const walker = document.createTreeWalker(
@@ -228,7 +280,6 @@ class PageTranslator {
     // 去重：如果 A 包含 B 且文本高度重叠，保留 B（更细粒度）
     return this._dedupSegments(segments);
   }
-
   /**
    * 去重：移除包含其他段落的祖先元素
    * 例如 <div> 包裹 <p>，两者的 innerText 重叠 → 保留 <p>
@@ -238,21 +289,19 @@ class PageTranslator {
     const elementSet = new Set(segments.map(s => s.element));
 
     return segments.filter(seg => {
-      // 检查当前元素是否包含其他段落元素
       for (const other of elementSet) {
         if (other === seg.element) continue;
         if (seg.element.contains(other) && this._textsOverlap(seg.text, segmentMap.get(other)?.text || '')) {
           return false; // 是祖先，且文本重叠 → 移除
         }
       }
-      // 聚合容器检测：父元素包含 ≥3 个子段落且子文本均为父文本子串时，
-      // 父元素是多个独立条目的容器（如热榜、新闻轮播），应移除
       if (this._isAggregateContainer(seg, segments, segmentMap)) {
         return false;
       }
       return true;
     });
   }
+
 
   /**
    * 检测元素是否为聚合容器
@@ -273,7 +322,6 @@ class PageTranslator {
     }
     return matched >= 3;
   }
-
   /** 判断两段文本是否有重叠（简化：子串匹配或 80%+ 相似度） */
   _textsOverlap(parentText, childText) {
     if (!parentText || !childText) return false;
@@ -288,6 +336,7 @@ class PageTranslator {
     const union = new Set([...parentWords, ...childWords]).size;
     return (intersection / union) > 0.7;
   }
+
 
   _getMeaningfulText(el) {
     if (el.offsetParent === null && el.tagName !== 'BODY') {
@@ -460,6 +509,11 @@ class PageTranslator {
         <span class="tr-loading-hint">翻译中...</span>
       `;
 
+      // flex/grid 容器保护：译文注入的子元素不干扰原有排列
+      this._applyLayoutProtection(ph, seg.element);
+
+
+
       // 注入到原文元素内部，不改变同级 DOM 结构
       seg.element.appendChild(ph);
       placeholders.push({ id, element: seg.element });
@@ -469,8 +523,29 @@ class PageTranslator {
   }
 
   /**
-   * 将加载占位符替换为翻译结果
-   * 译文注入到原文元素内部，不影响页面同级 DOM 结构
+   * flex/grid 容器保护：注入的子元素独占一行，不干扰原有排列
+   */
+  _applyLayoutProtection(el, host) {
+    const isFlexGrid = (el) => {
+      const d = getComputedStyle(el).display;
+      return d === 'flex' || d === 'inline-flex' || d === 'grid' || d === 'inline-grid';
+    };
+
+    if (!isFlexGrid(host) && (!host.parentElement || !isFlexGrid(host.parentElement))) return;
+
+    // min-width:100% 比 width:100% 更强力（在 flex-wrap:nowrap 下也能强制撑满）
+    el.style.setProperty('flex', '0 0 100%', 'important');
+    el.style.setProperty('min-width', '100%', 'important');
+    el.style.setProperty('max-width', '100%', 'important');
+    el.style.setProperty('box-sizing', 'border-box', 'important');
+    el.style.setProperty('grid-column', '1 / -1', 'important');
+  }
+
+
+
+  /**
+   * 替换占位符 → 译文。
+   * 对 flex/grid 容器自动应用布局保护，译文独占一行不干扰原始排列。
    */
   _replacePlaceholder(id, translatedText, origElement) {
     const restored = this._restoreLatex(translatedText);
@@ -480,38 +555,42 @@ class PageTranslator {
       if (el) el.remove();
       return;
     }
-
     // 检查是否与原文相同（比较时去除 restored 中的 HTML 标签）
     const origText = (origElement.innerText || origElement.textContent || '').trim();
     if (this._stripHtml(restored) === origText) {
-      const el = document.getElementById(id);
-      if (el) el.remove();
-      return;
+      // 短文本（< 15 字符）即使译后相同也注入，保持视觉流程一致
+      // 长文本跳过（确无有效翻译）
+      if (origText.length >= 15) {
+        const el = document.getElementById(id);
+        if (el) el.remove();
+        return;
+      }
     }
 
-    // 替换占位符：在原文元素内部追加译文 span。用 innerHTML 以支持公式 DOM
     const transSpan = document.createElement('span');
     transSpan.className = 'tr-bilingual tr-bilingual--done';
     transSpan.setAttribute('data-translator', 'true');
     transSpan.innerHTML = restored.trim();
 
+    // flex/grid 容器保护：译文独占一行，不干扰原有排列
+    this._applyLayoutProtection(transSpan, origElement);
+
     const oldEl = document.getElementById(id);
     if (oldEl && oldEl.parentNode) {
-      const br = document.createElement('br');
-      br.setAttribute('data-translator', 'true');
-      oldEl.parentNode.insertBefore(br, oldEl);
+      // 不注入 <br>（flex 容器中 br 可能成为多余的 flex 子项）
+      // 靠 CSS .tr-bilingual 的 display:block 自然换行
       oldEl.parentNode.insertBefore(transSpan, oldEl);
       oldEl.remove();
     } else {
-      // 兜底：占位符未找到，直接追加到原文元素末尾
-      const br = document.createElement('br');
-      br.setAttribute('data-translator', 'true');
-      origElement.appendChild(br);
+      // 兜底：直接追加到原文元素末尾
       origElement.appendChild(transSpan);
     }
 
+
     origElement.setAttribute('data-translated', 'true');
   }
+
+
 
   /* ================================================================
    * 进度指示
