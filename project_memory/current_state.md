@@ -34,11 +34,14 @@ background (service-worker.js)
 
 ## 整页翻译流程
 
-1. TreeWalker 遍历 DOM，提取块级元素（P/H1-H6/LI/TD/TH/DT/DD/DIV/SECTION/ARTICLE/ASIDE/MAIN/HEADER/FOOTER），跳过 SPAN/LABEL/LEGEND 等内联标签及 code/pre/svg/公式容器
+1. TreeWalker 遍历 DOM，提取块级元素（P/H1-H6/LI/TD/TH/DT/DD/DIV/SECTION/ARTICLE/ASIDE/MAIN/HEADER/FOOTER）+ nav/header 内的 `<a>` 链接，跳过 SPAN/LABEL/LEGEND 等内联标签及 code/pre/svg/公式容器；跳过 `<nav>` 容器（子链接单独提取）
 2. 每个原文元素内部追加骨架屏占位（`<span class="tr-loading">`）
 3. 内容过滤（`_isContentText`）：跳过 UI 标签、技术指标、代码标识符、纯数字/符号等非内容文本
 4. 并发翻译（`_processBatchesConcurrently`）：3 路并发请求，每批 20-30 段，无固定批次延迟
-5. 译文注入原文元素内部：`<原文元素>原文<span class="tr-bilingual">译文</span></原文元素>`（无需 `<br>`，CSS `display:block` 换行）
+5. 译文注入原文元素内部，智能选择注入模式：
+   - **内联模式**（短文本 <25字符 / inline-flex 容器）：`display:inline` + `margin-left:0.5em`，同行显示原文+译文
+   - **块级模式**（长文本 / block flex-grid 容器）：`display:block` 或 `flex:0 0 100%`，译文独占一行
+   - **默认模式**（非 flex 容器）：CSS `.tr-bilingual { display:block }` 自然换行
 6. 翻译完成后启动 MutationObserver，监测后续动态加载内容
 7. `_runId` 防交叉批次 + `_aborted` 防取消后注入
 
@@ -145,6 +148,12 @@ background (service-worker.js)
 14. **并发池无线程竞争**：JS 单线程，`_translatedCount` 递增安全；批次独立互不干扰
 15. **`|||` 分片对齐保护**：翻译引擎可能增删分隔符，`chunks[j] || ''` 兜底保证不丢段
 16. **blockTags 不含 SPAN/LABEL/LEGEND**：SPAN 是内联样式标签不应作为独立段落提取，否则段落内 `<span>` 导致碎片化翻译；LABEL 是表单标签，LEGEND 是 fieldset 标签，同样不适合独立提取
+17. **nav 内 `<a>` 链接需单独提取**：TreeWalker 默认跳过内联 `<a>` 标签，需特殊处理 nav/header 内的链接作为独立翻译段
+18. **flex/grid 容器需区分 inline/block 上下文**：inline-flex（导航栏等）用 `display:inline` 保持同行，block-flex 用 `flex:0 0 100%` 独占行
+19. **短文本译文自动 inline**：原文 <40字符 + 译文 <25字符 → `display:inline` + `margin-left:0.5em`，避免短小译文独占一行造成排版松散
+20. **Observer 必须在批量翻译完成后才启动**：`_batchInProgress` 标记防止 Observer 在批量翻译期间触发，避免重复翻译和 `|||` 分隔符残留
+21. **Observer 必须使用 `_splitNumberedResult` 兜底**：翻译引擎可能增删 `|||` 分隔符，Observer 的 chunk 拆分需与 `_processBatchesConcurrently` 对齐
+22. **inline 模式必须清除 flex 属性**：`display:inline` 与 `flex:0 0 100%` 同时存在会导致样式冲突，inline 模式需移除 `flex/min-width/max-width/grid-column`
 
 
 
@@ -172,6 +181,13 @@ background (service-worker.js)
 | 2026-06-05 | `content/page-translator.js` | `<br>` 注入在 flex 中成为多余子项 | 移除 `<br>` 注入，靠 CSS `display:block` 换行 |
 | 2026-06-05 | `content/page-translator.js` | 段落内 `<span>` 被提取导致碎片化翻译 | 从 blockTags 移除 SPAN、LABEL、LEGEND |
 | 2026-06-05 | `content/page-translator.js` | 大写缩写过滤误杀导航标签 | `{2,6}`→`{2,3}`，4字以上导航标签通过 |
+| 2026-06-05 | `content/page-translator.js` | 导航链接（nav 内 `<a>`）未被翻译 | TreeWalker 新增 `<a>` 标签提取（限 nav/header 内）；`_getMeaningfulText` 允许 `<a>/<font>` 子元素；`_dedupSegments` 跳过 nav/header 容器 |
+| 2026-06-05 | `content/page-translator.js` | flex 容器中译文全部独占一行（"32\n内置工具"），破坏导航栏等紧凑布局 | `_applyLayoutProtection` 改为上下文感知：inline-flex → `display:inline`（同行显示），block flex → `flex:0 0 100%`（独占行） |
+| 2026-06-05 | `content/page-translator.js` | 短文本译文独占一行导致排版松散 | `_replacePlaceholder` 短文本（<25字符）自动 `display:inline` + `margin-left:0.5em`，同行显示原文+译文 |
+| 2026-06-05 | `content/page-translator.js` | Observer 注入 `<br>` 在 flex 中成为多余子项 | `_translateNewContent` 移除 `<br>` 注入，改用智能 inline/block 模式 |
+| 2026-06-05 | `content/page-translator.js` | Observer 重复翻译已翻译内容（每个元素多个翻译 span） | 新增 `_batchInProgress` 标记防止 Observer 在批量翻译期间触发；Observer 过滤已有 `.tr-bilingual` 子元素或 `data-translated` 属性的元素 |
+| 2026-06-05 | `content/page-translator.js` | `\|\|\|` 分隔符直接显示在页面上 | Observer `_translateNewContent` 添加 `_splitNumberedResult` 兜底（与 `_processBatchesConcurrently` 对齐） |
+| 2026-06-05 | `content/page-translator.js` | inline 和 flex 样式冲突（同时设 `flex:0 0 100%` 和 `display:inline`） | inline 模式时清除 `flex/min-width/max-width/grid-column` 属性，避免 CSS 冲突 |
 
 
 

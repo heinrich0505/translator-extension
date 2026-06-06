@@ -17,6 +17,7 @@ class PageTranslator {
     this._observerDebounce = null;
     this._translateCache = new Map();
     this._runId = 0;
+    this._batchInProgress = false;
   }
 
   /** 触发整页翻译 */
@@ -66,7 +67,12 @@ class PageTranslator {
     const CONCURRENCY = 3;
 
     // Step 3: 用并发池处理批次（3 路并发，每批 20-30 段）
-    await this._processBatchesConcurrently(filtered, placeholders, target, runId, BATCH_SIZE, CONCURRENCY);
+    this._batchInProgress = true;
+    try {
+      await this._processBatchesConcurrently(filtered, placeholders, target, runId, BATCH_SIZE, CONCURRENCY);
+    } finally {
+      this._batchInProgress = false;
+    }
 
     // 清理
     this._removeProgressBadge();
@@ -244,6 +250,14 @@ class PageTranslator {
         acceptNode: (node) => {
           if (!node || !node.tagName) return NodeFilter.FILTER_REJECT;
           if (node.matches && node.matches(skipSelector)) return NodeFilter.FILTER_REJECT;
+          // 跳过 nav 容器本身（其子链接会被单独提取）
+          if (node.tagName === 'NAV') return NodeFilter.FILTER_SKIP;
+          // 允许 nav/header 内的 <a> 链接作为独立翻译段
+          if (node.tagName === 'A' && node.closest && node.closest('nav, header')) {
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
           if (!blockTags.has(node.tagName)) return NodeFilter.FILTER_SKIP;
           const style = window.getComputedStyle(node);
           if (style.display === 'none' || style.visibility === 'hidden') return NodeFilter.FILTER_REJECT;
@@ -289,6 +303,13 @@ class PageTranslator {
     const elementSet = new Set(segments.map(s => s.element));
 
     return segments.filter(seg => {
+      // 跳过 nav/header 容器（其子链接已被单独提取翻译）
+      if (seg.element.tagName === 'NAV' || seg.element.tagName === 'HEADER') {
+        const hasTranslatableChildren = segments.some(s =>
+          s.element !== seg.element && seg.element.contains(s.element));
+        if (hasTranslatableChildren) return false;
+      }
+
       for (const other of elementSet) {
         if (other === seg.element) continue;
         if (seg.element.contains(other) && this._textsOverlap(seg.text, segmentMap.get(other)?.text || '')) {
@@ -356,7 +377,7 @@ class PageTranslator {
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         childElementCount++;
         const tag = node.tagName.toLowerCase();
-        if (['strong', 'em', 'b', 'i', 'a', 'sub', 'sup', 'mark', 'small', 'u', 's', 'span'].includes(tag)) {
+        if (['strong', 'em', 'b', 'i', 'a', 'sub', 'sup', 'mark', 'small', 'u', 's', 'span', 'font'].includes(tag)) {
           if (this._hasLatex(node)) {
             // DOM 渲染型公式 → 占位符，存 textContent（公式文字），原件 SVG 依旧可见
             directText += this._getLatexPlaceholder(node);
@@ -523,22 +544,47 @@ class PageTranslator {
   }
 
   /**
-   * flex/grid 容器保护：注入的子元素独占一行，不干扰原有排列
+   * flex/grid 容器保护：根据上下文智能选择 inline 或 block 注入模式
+   * - 内联 flex（如导航栏）：译文用 inline + 空格分隔，保持同一行
+   * - 块级 flex/grid：译文独占一行，不干扰原有排列
+   * - 非 flex/grid：不干预，由 CSS 默认 display:block 控制
    */
   _applyLayoutProtection(el, host) {
-    const isFlexGrid = (el) => {
-      const d = getComputedStyle(el).display;
+    const isFlexGrid = (e) => {
+      if (!e) return false;
+      const d = getComputedStyle(e).display;
       return d === 'flex' || d === 'inline-flex' || d === 'grid' || d === 'inline-grid';
     };
 
-    if (!isFlexGrid(host) && (!host.parentElement || !isFlexGrid(host.parentElement))) return;
+    // 检测：元素自身或父容器是否为 flex/grid
+    const hostIsFlex = isFlexGrid(host);
+    const parentIsFlex = host.parentElement && isFlexGrid(host.parentElement);
 
-    // min-width:100% 比 width:100% 更强力（在 flex-wrap:nowrap 下也能强制撑满）
-    el.style.setProperty('flex', '0 0 100%', 'important');
-    el.style.setProperty('min-width', '100%', 'important');
-    el.style.setProperty('max-width', '100%', 'important');
-    el.style.setProperty('box-sizing', 'border-box', 'important');
-    el.style.setProperty('grid-column', '1 / -1', 'important');
+    if (!hostIsFlex && !parentIsFlex) return; // 非 flex/grid，不干预
+
+    // 判断是否为内联级容器（inline-flex/inline-grid 或导航栏等紧凑型容器）
+    const hostDisplay = getComputedStyle(host).display || '';
+    const parentDisplay = host.parentElement ? getComputedStyle(host.parentElement).display : '';
+    const isInlineContext = hostDisplay.startsWith('inline') || parentDisplay.startsWith('inline');
+
+    if (isInlineContext) {
+      // 内联上下文（如导航栏）：译文用 inline 模式，保持同行
+      // 清除可能冲突的 flex/grid 属性
+      el.style.setProperty('display', 'inline', 'important');
+      el.style.setProperty('margin-left', '0.5em', 'important');
+      el.style.setProperty('vertical-align', 'baseline', 'important');
+      el.style.removeProperty('flex');
+      el.style.removeProperty('min-width');
+      el.style.removeProperty('max-width');
+      el.style.removeProperty('grid-column');
+    } else {
+      // 块级 flex/grid：译文独占一行
+      el.style.setProperty('flex', '0 0 100%', 'important');
+      el.style.setProperty('min-width', '100%', 'important');
+      el.style.setProperty('max-width', '100%', 'important');
+      el.style.setProperty('box-sizing', 'border-box', 'important');
+      el.style.setProperty('grid-column', '1 / -1', 'important');
+    }
   }
 
 
@@ -572,8 +618,22 @@ class PageTranslator {
     transSpan.setAttribute('data-translator', 'true');
     transSpan.innerHTML = restored.trim();
 
-    // flex/grid 容器保护：译文独占一行，不干扰原有排列
+    // flex/grid 容器保护：根据上下文智能选择 inline/block 模式
     this._applyLayoutProtection(transSpan, origElement);
+
+    // 短文本（< 25字符）在非 flex 上下文中也用 inline 模式，保持视觉紧凑
+    // 类似 Immersive Translate 的做法：原文  译文（同行显示）
+    const plainText = this._stripHtml(restored);
+    if (plainText.length < 25 && origText.length < 40
+        && !transSpan.style.getPropertyValue('display')) {
+      transSpan.style.setProperty('display', 'inline', 'important');
+      transSpan.style.setProperty('margin-left', '0.5em', 'important');
+      // 清除可能冲突的 flex/grid 属性
+      transSpan.style.removeProperty('flex');
+      transSpan.style.removeProperty('min-width');
+      transSpan.style.removeProperty('max-width');
+      transSpan.style.removeProperty('grid-column');
+    }
 
     const oldEl = document.getElementById(id);
     if (oldEl && oldEl.parentNode) {
@@ -668,10 +728,18 @@ class PageTranslator {
   }
 
   async _translateNewContent(targetLang) {
+    // 批量翻译进行中时不处理，避免冲突
+    if (this._batchInProgress) return;
+
     // _extractSegments 会自动跳过 [data-translated] 元素
     let segments = this._extractSegments();
-    // 过滤：祖先元素内嵌了已译子元素，Observer 不应重复翻译
-    segments = segments.filter(s => !s.element.querySelector('[data-translated]'));
+    // 过滤：元素本身或其子元素已有翻译的，不重复翻译
+    segments = segments.filter(s => {
+      if (s.element.querySelector('[data-translated]')) return false;
+      if (s.element.querySelector('.tr-bilingual')) return false;
+      if (s.element.hasAttribute('data-translated')) return false;
+      return true;
+    });
     if (segments.length === 0) return;
 
     try {
@@ -693,7 +761,11 @@ class PageTranslator {
         this._translateCache.set(batchText, result.translated);
       }
 
-      const chunks = result.translated.split('|||').map(c => c.trim());
+      let chunks = result.translated.split('|||').map(c => c.trim());
+      // 当分隔符拆分不匹配时，使用 _splitNumberedResult 兜底
+      if (chunks.length !== segments.length) {
+        chunks = Translators._splitNumberedResult(result.translated || '', segments.length);
+      }
       for (let i = 0; i < Math.min(segments.length, chunks.length); i++) {
         const restored = this._restoreLatex(chunks[i] || '');
         if (!restored.trim()) continue;
@@ -706,9 +778,24 @@ class PageTranslator {
         transSpan.innerHTML = restored.trim();
 
         const origEl = segments[i].element;
-        const br = document.createElement('br');
-        br.setAttribute('data-translator', 'observer');
-        origEl.appendChild(br);
+
+        // flex/grid 容器保护：根据上下文智能选择 inline/block 模式
+        this._applyLayoutProtection(transSpan, origEl);
+
+        // 短文本用 inline 模式
+        const origTextLen = (origEl.innerText || '').trim().length;
+        const plainText = this._stripHtml(restored);
+        if (plainText.length < 25 && origTextLen < 40
+            && !transSpan.style.getPropertyValue('display')) {
+          transSpan.style.setProperty('display', 'inline', 'important');
+          transSpan.style.setProperty('margin-left', '0.5em', 'important');
+          // 清除可能冲突的 flex/grid 属性
+          transSpan.style.removeProperty('flex');
+          transSpan.style.removeProperty('min-width');
+          transSpan.style.removeProperty('max-width');
+          transSpan.style.removeProperty('grid-column');
+        }
+
         origEl.appendChild(transSpan);
 
         origEl.setAttribute('data-translated', 'true');
