@@ -200,13 +200,16 @@ background (service-worker.js)
 
 ## 已知待处理问题
 
-（暂无）
+- 排版可进一步优化（用户反馈"翻译还行，但是排版还可以再优化"）
+- 需对比 Immersive Translate 等商业插件的排版效果，持续改进
 
 ## 下一步计划
 
+- [ ] **排版优化**（优先）：对比 Immersive Translate，改进译文注入样式，处理更多布局场景（表格、列表、卡片等）
 - [ ] 全文翻译缓存持久化（跨页面加载复用，localStorage 或 chrome.storage.local）
 - [ ] 页面切换时自动清理/恢复翻译状态
 - [x] 大页面智能分片翻译（已实现：自适应 BATCH_SIZE + 3路并发池 + 内容预过滤）
+- [x] 导航链接翻译 + inline/block 自适应布局（已实现）
 
 - [ ] 支持更多 OpenAI 兼容模型预设（DeepSeek、通义千问、智谱等一键配置）
 - [ ] 自定义 CSS 选择器规则（用户指定哪些元素翻译/不翻译）
